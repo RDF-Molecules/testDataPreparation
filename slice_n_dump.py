@@ -5,10 +5,12 @@ import requests as rq
 from requests import Request, Session
 import codecs
 import sys
+import json
 reload(sys)
 sys.setdefaultencoding("utf-8")
 
 endpoint = "http://dbpedia.org/sparql"
+dydra = "https://dydra.com/mgalkin/dbpedia_hierarchy/sparql"
 def checkNumTriples():
 
 
@@ -270,5 +272,270 @@ def buildAdditionalDataset():
 
     return 0
 
-buildAdditionalDataset()
+#buildAdditionalDataset()
 # STEP 3: Generate dumps with conflicts of 4 types
+
+#subpropcache = dict()
+with open('subpropcache.txt') as f:
+  subpropcache = dict(x.rstrip().split(None, 1) for x in f)
+superclasscache = dict()
+broadercache = dict()
+dctcache = dict()
+
+def generateDumps(numdumps):
+
+    gold = codecs.open("goldStandard.nt", "r")
+    dumpFiles = []
+    #g = rdflib.Graph()
+    #g.parse("goldStandard.nt", format="n3")
+    for i in xrange(0, numdumps):
+        filename = "dump"+str(i)+".nt"
+        dumpfile = codecs.open(filename,"a")
+        dumpFiles.append(dumpfile)
+
+    count = 1
+
+    for line in gold:
+        count += 1
+        # if (count<745067):
+        #     continue
+        triple = line.split(" ")
+        subject = triple[0]
+        predicate = triple[1]
+        object = ""
+        if len(triple)==4:
+            object = triple[2]
+        else:
+            for i in xrange(2,len(triple)-1):
+                object += triple[i]+" "
+        print object
+
+        # Decide which conflict to introduce
+        # 0 - replace predicate with subPropertyOf
+        # 1 - replace object with superclass
+        # 2 - replace object with skos:broader
+        # 3 - replace object with dct:subject
+        # 4 - do nothing
+
+        toCopy = selectDumps(numdumps, dumpFiles)
+        options = []
+        if checkAvailable("subPropertyOf",predicate):
+            options.append(0)
+        if "\"" not in object:
+            if checkAvailable("subClassOf",object):
+                options.append(1)
+            if ("Category" in object) or ("category" in object):
+                if checkAvailable("broader", object):
+                    options.append(2)
+            if checkAvailable("dctsub", object):
+                options.append(3)
+        options.append(4)
+        print options
+
+        for dumpcopy in toCopy:
+            choice = random.choice(options)
+            print choice
+
+            if choice == 0:
+                newProp = getSubproperty(predicate)
+                print subject+" "+newProp+" "+object+" .\n"
+                dumpcopy.write(subject+" "+newProp+" "+object+" .\n")
+            elif choice == 1:
+                newObj = getSuperclass(object)
+                print subject+" "+predicate+" "+newObj+" .\n"
+                dumpcopy.write(subject+" "+predicate+" "+newObj+" .\n")
+            elif choice == 2:
+                newObj = getBroader(object)
+                print subject+" "+predicate+" "+newObj+" .\n"
+                dumpcopy.write(subject+" "+predicate+" "+newObj+" .\n")
+            elif choice == 3:
+                newObj = getDctsub(object)
+                print subject+" "+predicate+" "+newObj+" .\n"
+                dumpcopy.write(subject+" "+predicate+" "+newObj+" .\n")
+            elif choice == 4:
+                dumpcopy.write(line)
+
+
+        print "%i triples processed"%count
+
+        # Decide where to write new triple
+        # Then generate k conflicts where k is the sampled number of dumps to write
+    for dfile in dumpFiles:
+        dfile.close()
+    gold.close()
+    return 0
+
+def checkAvailable(toCheck,entity):
+
+    if toCheck=="subPropertyOf":
+        # querySubprop = """
+        #         PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+        #         ASK {
+        #             %s rdfs:subPropertyOf ?p1.
+        #         }
+        #     """ % entity
+        # gg = SPARQLWrapper(endpoint)
+        # gg.setReturnFormat(JSON)
+        # gg.setQuery(querySubprop)
+        # results = gg.query().convert()
+        #print results["boolean"]
+        return entity in subpropcache
+    elif toCheck=="subClassOf":
+        if entity in superclasscache:
+            if (superclasscache[entity] == False):
+                return False
+            else:
+                return True
+        else:
+            try:
+                querySuperclass = """
+                    PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+                    SELECT ?class {
+                        %s rdfs:subClassOf+ ?class
+                    }
+                """ % entity
+                gg = SPARQLWrapper(endpoint)
+                gg.setReturnFormat(JSON)
+                gg.setQuery(querySuperclass)
+                results = gg.query().convert()
+
+                if len(results["results"]["bindings"])==0:
+                    superclasscache[entity] = False
+                    return False
+                else:
+                    classes = []
+                    for row in results["results"]["bindings"]:
+                        classes.append("<"+row["class"]["value"]+">")
+                    superclasscache[entity] = classes
+                    return True
+            except:
+                superclasscache[entity] = False
+    elif toCheck=="broader":
+        if entity in broadercache:
+            if (broadercache[entity] == False):
+                return False
+            else:
+                return True
+        else:
+            try:
+                queryBroader = """
+                    PREFIX skos: <http://www.w3.org/2004/02/skos/core#>
+                    SELECT ?b {
+                        %s skos:broader ?b
+                    }
+                """ % entity.lower()
+                gg = SPARQLWrapper(dydra)
+                gg.setReturnFormat(JSON)
+                gg.setQuery(queryBroader)
+                results = gg.query().convert()
+                if len(results["results"]["bindings"])==0:
+                    broadercache[entity] = False
+                    return False
+                else:
+                    classes = []
+                    for row in results["results"]["bindings"]:
+                        classes.append("<"+row["b"]["value"].replace("category","Category")+">")
+                    broadercache[entity] = classes
+                    return True
+            except:
+                broadercache[entity] = False
+    elif toCheck=="dctsub":
+        if entity in dctcache:
+            if (dctcache[entity] == False):
+                return False
+            else:
+                return True
+        else:
+            try:
+                queryDctsubj = """
+                    PREFIX dct: <http://purl.org/dc/terms/>
+                    SELECT ?sub {
+                        %s dct:subject ?sub
+                    }
+                """ % entity
+                gg = SPARQLWrapper(endpoint)
+                gg.setReturnFormat(JSON)
+                gg.setQuery(queryDctsubj)
+                results = gg.query().convert()
+                if len(results["results"]["bindings"])==0:
+                    dctcache[entity] = False
+                    return False
+                else:
+                    classes = []
+                    for row in results["results"]["bindings"]:
+                        classes.append("<"+row["sub"]["value"]+">")
+                    dctcache[entity] = classes
+                    return True
+            except:
+                dctcache[entity] = False
+
+def getSubproperty(prop):
+    # query = """
+    #     PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+    #     SELECT ?p
+    #     WHERE {
+    #         %s rdfs:subPropertyOf+ ?p
+    #     }
+    # """ % prop
+    # gg = SPARQLWrapper(endpoint)
+    # gg.setReturnFormat(JSON)
+    # gg.setQuery(query)
+    # results = gg.query().convert()
+    # props = []
+    # for row in results["results"]["bindings"]:
+    #     props.append("<"+row["p"]["value"]+">")
+    # return random.choice(props)
+    return subpropcache[prop]
+
+def getSuperclass(ent):
+    # query = """
+    #     PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+    #     SELECT ?class
+    #     WHERE {
+    #         %s rdfs:subClassOf ?class
+    #     }
+    # """ % ent
+    # gg = SPARQLWrapper(endpoint)
+    # gg.setReturnFormat(JSON)
+    # gg.setQuery(query)
+    # results = gg.query().convert()
+    classes = superclasscache[ent]
+    # for row in results["results"]["bindings"]:
+    #     classes.append("<"+row["class"]["value"]+">")
+    return random.choice(classes)
+
+def getBroader(ent):
+    # query = """
+    #     PREFIX skos: <http://www.w3.org/2004/02/skos/core#>
+    #     SELECT ?class
+    #     WHERE {
+    #         %s skos:broader ?class
+    #     }
+    # """ % ent
+    # gg = SPARQLWrapper(dydra)
+    # gg.setReturnFormat(JSON)
+    # gg.setQuery(query)
+    # results = gg.query().convert()
+    classes = broadercache[ent]
+    # for row in results["results"]["bindings"]:
+    #     classes.append("<"+row["class"]["value"]+">")
+    return random.choice(classes)
+
+def getDctsub(ent):
+    # query = """
+    #     PREFIX dct: <http://purl.org/dc/terms/>
+    #     SELECT ?class
+    #     WHERE {
+    #         %s dct:subject ?class
+    #     }
+    # """ % ent
+    # gg = SPARQLWrapper(endpoint)
+    # gg.setReturnFormat(JSON)
+    # gg.setQuery(query)
+    # results = gg.query().convert()
+    classes = dctcache[ent]
+    # for row in results["results"]["bindings"]:
+    #     classes.append("<"+row["class"]["value"]+">")
+    return random.choice(classes)
+
+generateDumps(3)
